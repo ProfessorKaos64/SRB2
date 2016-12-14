@@ -120,8 +120,10 @@ typedef struct
 	float       offset;
 	md2_model_t *model;
 	void        *grpatch;
+	void        *blendgrpatch;
 	boolean     notfound;
 	INT32       skin;
+	boolean     error;
 } md2_t;
 
 extern md2_t md2_models[NUMSPRITES];

@@ -2,7 +2,7 @@
 //-----------------------------------------------------------------------------
 // Copyright (C) 1993-1996 by id Software, Inc.
 // Copyright (C) 1998-2000 by DooM Legacy Team.
-// Copyright (C) 1999-2014 by Sonic Team Junior.
+// Copyright (C) 1999-2016 by Sonic Team Junior.
 //
 // This program is free software distributed under the
 // terms of the GNU General Public License, version 2.
@@ -71,10 +71,12 @@ consvar_t cv_grgammagreen = {"gr_gammagreen", "127", CV_SAVE|CV_CALL, grgamma_co
                              CV_Gammaxxx_ONChange, 0, NULL, NULL, 0, 0, NULL};
 consvar_t cv_grgammablue = {"gr_gammablue", "127", CV_SAVE|CV_CALL, grgamma_cons_t,
                             CV_Gammaxxx_ONChange, 0, NULL, NULL, 0, 0, NULL};
+#ifdef ALAM_LIGHTING
 consvar_t cv_grdynamiclighting = {"gr_dynamiclighting", "On", CV_SAVE, CV_OnOff, NULL, 0, NULL, NULL, 0, 0, NULL};
 consvar_t cv_grstaticlighting  = {"gr_staticlighting", "On", CV_SAVE, CV_OnOff, NULL, 0, NULL, NULL, 0, 0, NULL};
 consvar_t cv_grcoronas = {"gr_coronas", "On", CV_SAVE, CV_OnOff, NULL, 0, NULL, NULL, 0, 0, NULL};
 consvar_t cv_grcoronasize = {"gr_coronasize", "1", CV_SAVE| CV_FLOAT, 0, NULL, 0, NULL, NULL, 0, 0, NULL};
+#endif
 
 static CV_PossibleValue_t CV_MD2[] = {{0, "Off"}, {1, "On"}, {2, "Old"}, {0, NULL}};
 // console variables in development
@@ -336,6 +338,8 @@ void V_DrawFixedPatch(fixed_t x, fixed_t y, fixed_t pscale, INT32 scrn, patch_t 
 	const column_t *column;
 	UINT8 *desttop, *dest, *deststart, *destend;
 	const UINT8 *source, *deststop;
+	fixed_t pwidth; // patch width
+	fixed_t offx = 0; // x offset
 
 	if (rendermode == render_none)
 		return;
@@ -366,7 +370,7 @@ void V_DrawFixedPatch(fixed_t x, fixed_t y, fixed_t pscale, INT32 scrn, patch_t 
 	}
 	if (alphalevel)
 	{
-		v_translevel = ((alphalevel)<<FF_TRANSSHIFT) - 0x10000 + transtables;
+		v_translevel = transtables + ((alphalevel-1)<<FF_TRANSSHIFT);
 		patchdrawfunc = translucentpdraw;
 	}
 
@@ -476,16 +480,36 @@ void V_DrawFixedPatch(fixed_t x, fixed_t y, fixed_t pscale, INT32 scrn, patch_t 
 		}
 	}
 
-	deststart = desttop;
-	destend = desttop + SHORT(patch->width) * dupx;
+	if (pscale != FRACUNIT) // scale width properly
+	{
+		pwidth = SHORT(patch->width)<<FRACBITS;
+		pwidth = FixedMul(pwidth, pscale);
+		pwidth = FixedMul(pwidth, dupx<<FRACBITS);
+		pwidth >>= FRACBITS;
+	}
+	else
+		pwidth = SHORT(patch->width) * dupx;
 
-	for (col = 0; (col>>FRACBITS) < SHORT(patch->width); col += colfrac, ++x, desttop++)
+	deststart = desttop;
+	destend = desttop + pwidth;
+
+	for (col = 0; (col>>FRACBITS) < SHORT(patch->width); col += colfrac, ++offx, desttop++)
 	{
 		INT32 topdelta, prevdelta = -1;
-		if (x < 0) // don't draw off the left of the screen (WRAP PREVENTION)
-			continue;
-		if (x >= vid.width) // don't draw off the right of the screen (WRAP PREVENTION)
-			break;
+		if (flip) // offx is measured from right edge instead of left
+		{
+			if (x+pwidth-offx < 0) // don't draw off the left of the screen (WRAP PREVENTION)
+				break;
+			if (x+pwidth-offx >= vid.width) // don't draw off the right of the screen (WRAP PREVENTION)
+				continue;
+		}
+		else
+		{
+			if (x+offx < 0) // don't draw off the left of the screen (WRAP PREVENTION)
+				continue;
+			if (x+offx >= vid.width) // don't draw off the right of the screen (WRAP PREVENTION)
+				break;
+		}
 		column = (const column_t *)((const UINT8 *)(patch) + LONG(patch->columnofs[col>>FRACBITS]));
 
 		while (column->topdelta != 0xff)
@@ -750,43 +774,51 @@ void V_DrawFill(INT32 x, INT32 y, INT32 w, INT32 h, INT32 c)
 	if (!screens[0])
 		return;
 
-	if (x == 0 && y == 0 && w == BASEVIDWIDTH && h == BASEVIDHEIGHT)
-	{ // Clear the entire screen, from dest to deststop. Yes, this really works.
-		memset(screens[0], (UINT8)(c&255), vid.width * vid.height * vid.bpp);
-		return;
-	}
-
-	dest = screens[0] + y*dupy*vid.width + x*dupx;
-	deststop = screens[0] + vid.rowbytes * vid.height;
-
-	if (w == BASEVIDWIDTH)
-		w = vid.width;
-	else
-		w *= dupx;
-	if (h == BASEVIDHEIGHT)
-		h = vid.height;
-	else
-		h *= dupy;
-
-	if (x && y && x + w < vid.width && y + h < vid.height)
+	if (c & V_NOSCALESTART)
 	{
-		// Center it if necessary
-		if (vid.width != BASEVIDWIDTH * dupx)
-		{
-			// dupx adjustments pretend that screen width is BASEVIDWIDTH * dupx,
-			// so center this imaginary screen
-			if (c & V_SNAPTORIGHT)
-				dest += (vid.width - (BASEVIDWIDTH * dupx));
-			else if (!(c & V_SNAPTOLEFT))
-				dest += (vid.width - (BASEVIDWIDTH * dupx)) / 2;
+		dest = screens[0] + y*vid.width + x;
+		deststop = screens[0] + vid.rowbytes * vid.height;
+	}
+	else
+	{
+		if (x == 0 && y == 0 && w == BASEVIDWIDTH && h == BASEVIDHEIGHT)
+		{ // Clear the entire screen, from dest to deststop. Yes, this really works.
+			memset(screens[0], (UINT8)(c&255), vid.width * vid.height * vid.bpp);
+			return;
 		}
-		if (vid.height != BASEVIDHEIGHT * dupy)
+
+		dest = screens[0] + y*dupy*vid.width + x*dupx;
+		deststop = screens[0] + vid.rowbytes * vid.height;
+
+		if (w == BASEVIDWIDTH)
+			w = vid.width;
+		else
+			w *= dupx;
+		if (h == BASEVIDHEIGHT)
+			h = vid.height;
+		else
+			h *= dupy;
+
+		if (x && y && x + w < vid.width && y + h < vid.height)
 		{
-			// same thing here
-			if (c & V_SNAPTOBOTTOM)
-				dest += (vid.height - (BASEVIDHEIGHT * dupy)) * vid.width;
-			else if (!(c & V_SNAPTOTOP))
-				dest += (vid.height - (BASEVIDHEIGHT * dupy)) * vid.width / 2;
+			// Center it if necessary
+			if (vid.width != BASEVIDWIDTH * dupx)
+			{
+				// dupx adjustments pretend that screen width is BASEVIDWIDTH * dupx,
+				// so center this imaginary screen
+				if (c & V_SNAPTORIGHT)
+					dest += (vid.width - (BASEVIDWIDTH * dupx));
+				else if (!(c & V_SNAPTOLEFT))
+					dest += (vid.width - (BASEVIDWIDTH * dupx)) / 2;
+			}
+			if (vid.height != BASEVIDHEIGHT * dupy)
+			{
+				// same thing here
+				if (c & V_SNAPTOBOTTOM)
+					dest += (vid.height - (BASEVIDHEIGHT * dupy)) * vid.width;
+				else if (!(c & V_SNAPTOTOP))
+					dest += (vid.height - (BASEVIDHEIGHT * dupy)) * vid.width / 2;
+			}
 		}
 	}
 
@@ -944,45 +976,38 @@ void V_DrawFadeScreen(void)
 }
 
 // Simple translucency with one color, over a set number of lines starting from the top.
-void V_DrawFadeConsBack(INT32 plines, INT32 pcolor)
+void V_DrawFadeConsBack(INT32 plines)
 {
-	UINT8 *deststop, *colormap, *buf;
+	UINT8 *deststop, *buf;
 
 #ifdef HWRENDER // not win32 only 19990829 by Kin
 	if (rendermode != render_soft && rendermode != render_none)
 	{
 		UINT32 hwcolor;
-		switch (pcolor)
+		switch (cons_backcolor.value)
 		{
-			case 0:		hwcolor = 0xffffff00;	break;	//white
-			case 1:		hwcolor = 0xff800000;	break;	//orange
-			case 2:		hwcolor = 0x0000ff00;	break;	//blue
-			case 3:		hwcolor = 0x00800000;	break;	//green
-			case 4:		hwcolor = 0x80808000;	break;	//gray
-			case 5:		hwcolor = 0xff000000;	break;	//red
-			default:	hwcolor = 0x00800000;	break;	//green
+			case 0:		hwcolor = 0xffffff00;	break; // White
+			case 1:		hwcolor = 0x80808000;	break; // Gray
+			case 2:		hwcolor = 0x40201000;	break; // Brown
+			case 3:		hwcolor = 0xff000000;	break; // Red
+			case 4:		hwcolor = 0xff800000;	break; // Orange
+			case 5:		hwcolor = 0x80800000;	break; // Yellow
+			case 6:		hwcolor = 0x00800000;	break; // Green
+			case 7:		hwcolor = 0x0000ff00;	break; // Blue
+			case 8:		hwcolor = 0x4080ff00;	break; // Cyan
+			// Default green
+			default:	hwcolor = 0x00800000;	break;
 		}
 		HWR_DrawConsoleBack(hwcolor, plines);
 		return;
 	}
 #endif
 
-	switch (pcolor)
-	{
-		case 0:		colormap = cwhitemap; 	break;
-		case 1:		colormap = corangemap;	break;
-		case 2:		colormap = cbluemap;	break;
-		case 3:		colormap = cgreenmap;	break;
-		case 4:		colormap = cgraymap;	break;
-		case 5:		colormap = credmap;		break;
-		default:	colormap = cgreenmap;	break;
-	}
-
 	// heavily simplified -- we don't need to know x or y position,
 	// just the stop position
 	deststop = screens[0] + vid.rowbytes * min(plines, vid.height);
 	for (buf = screens[0]; buf < deststop; ++buf)
-		*buf = colormap[*buf];
+		*buf = consolebgmap[*buf];
 }
 
 // Gets string colormap, used for 0x80 color codes
@@ -1869,7 +1894,7 @@ void V_DoPostProcessor(INT32 view, postimg_t type, INT32 param)
 		angle_t disStart = (leveltime * 128) & FINEMASK; // in 0 to FINEANGLE
 		INT32 newpix;
 		INT32 sine;
-		//UINT8 *transme = ((tr_trans50)<<FF_TRANSSHIFT) + transtables;
+		//UINT8 *transme = transtables + ((tr_trans50-1)<<FF_TRANSSHIFT);
 
 		for (y = yoffset; y < yoffset+height; y++)
 		{
@@ -1926,7 +1951,7 @@ Unoptimized version
 		INT32 x, y;
 
 		// TODO: Add a postimg_param so that we can pick the translucency level...
-		UINT8 *transme = ((param)<<FF_TRANSSHIFT) - 0x10000 + transtables;
+		UINT8 *transme = transtables + ((param-1)<<FF_TRANSSHIFT);
 
 		for (y = yoffset; y < yoffset+height; y++)
 		{
@@ -1967,7 +1992,7 @@ Unoptimized version
 
 			for (y = 0; y < height; y++)
 			{
-				if (M_Random() < 32)
+				if (M_RandomChance(FRACUNIT/8)) // 12.5%
 					heatshifter[y] = true;
 			}
 
